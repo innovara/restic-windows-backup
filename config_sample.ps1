@@ -10,6 +10,7 @@ $LogRetentionDays = 30
 $BackupOnMeteredNetwork = $true
 $InternetTestAttempts = 10
 $GlobalRetryAttempts = 4
+$AutoUnlock = $true
 
 # email configuration
 $SendEmailOnSuccess = $false
