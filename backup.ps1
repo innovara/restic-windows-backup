@@ -4,10 +4,12 @@
 
 # =========== start configuration =========== #
 
-# load restic configuration parameters (destination, passwords, etc.)
-$SecretsScript = Join-Path $PSScriptRoot "secrets.ps1"
+# load restic environment variables with credentials
+$VaultFile = Join-Path $PSScriptRoot "secrets.vault"  # New
+$SecretsScript = Join-Path $PSScriptRoot "secrets.ps1"  # Legacy
+$VaultManagerPath = Join-Path $PSScriptRoot "VaultManager.ps1"
 
-# load backup configuration variables
+# load configuration variables
 $ConfigScript = Join-Path $PSScriptRoot "config.ps1"
 
 # =========== end configuration =========== #
@@ -534,7 +536,22 @@ function Invoke-Main {
     }
 
     # initialize secrets
-    . $SecretsScript
+    if ((Test-Path $VaultFile) -and (Test-Path $VaultManagerPath)) {
+        # use secure vault if available
+        . $VaultManagerPath
+        $VaultData = Export-VaultToEnv -VaultFile $VaultFile
+
+        if ($null -ne $VaultData) {
+            # map the specific email password key
+            if ($VaultData.ContainsKey("RESTIC_EMAIL_PASSWORD")) {
+                $Script:ResticEmailPassword = $VaultData["RESTIC_EMAIL_PASSWORD"]
+            }
+        }
+    }
+    elseif (Test-Path $SecretsScript) {
+        # fallback to legacy plain-text script if vault is missing
+        . $SecretsScript
+    }
 
     # initialize config
     . $ConfigScript
