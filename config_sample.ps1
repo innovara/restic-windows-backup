@@ -13,10 +13,16 @@ $GlobalRetryAttempts = 4
 $AutoUnlock = $true
 
 # email configuration
+$ResticEmailServer='<SMTP SERVER>'
+$ResticEmailPort='<SMTP PORT NUMBER, i.e. 25 or 587>'
+$ResticEmailTo='<DESTINATION EMAIL ADDRESS>'
+$ResticEmailFrom='<FROM EMAIL ADDRESS>'
+$ResticEmailUsername='<EMAIL LOGIN USERNAME OR EMPTY FOR NO USERNAME>'
 $SendEmailOnSuccess = $false
 $SendEmailOnError = $true
 
 # backup configuration
+$Env:RESTIC_REPOSITORY='<REPO URL>'
 $WindowsExcludeFile = Join-Path $InstallPath "windows.exclude"
 $LocalExcludeFile = Join-Path $InstallPath "local.exclude"
 $IgnoreMissingBackupSources = $false
