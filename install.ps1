@@ -102,7 +102,16 @@ else {
 }
 
 # Install NuGet and Send-MailKitMessage module (by force)
-if ($PSVersionTable.PSVersion.Major -eq 5) {
-    Install-PackageProvider -Name NuGet -Force
+# For Windows PowerShell
+if (Get-Command powershell.exe -ErrorAction SilentlyContinue) {
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command {
+        Install-PackageProvider -Name NuGet -Force > $null
+        Install-Module Send-MailKitMessage -Repository PSGallery -Scope AllUsers -Force
+    }
 }
-Install-Module Send-MailKitMessage -Repository PSGallery -Scope AllUsers -Force
+# For PowerShell
+if (Get-Command pwsh -ErrorAction SilentlyContinue) {
+    pwsh -NoProfile -ExecutionPolicy Bypass -Command {
+        Install-Module Send-MailKitMessage -Repository PSGallery -Scope AllUsers -Force
+    }
+}
