@@ -72,6 +72,31 @@ if(-not (Test-Path $LocalExcludeFile)) {
     New-Item -Type File -Path $LocalExcludeFile | Out-Null
 }
 
+# Setup SSH for SYSTEM if required
+if ($Env:RESTIC_REPOSITORY -like "sftp:*") {
+    Write-Host "[[SSH]] Configuring SYSTEM SSH environment..."
+    . (Join-Path $PSScriptRoot "InitializeSSH.ps1")
+    # Ensure identity
+    $PublicKey = Get-SystemSSHKey
+    # Ensure trust (known_hosts)
+    if ($Env:RESTIC_REPOSITORY -match "@([^/:]+):") {
+        $HostName = $Matches[1]
+        $SshPath = Join-Path $Env:SystemRoot "System32\config\systemprofile\.ssh"
+        Write-Host "[[SSH]] Scanning host fingerprint for $HostName..."
+        $Fingerprint = ssh-keyscan -t ed25519 $HostName 2>$null
+        if ($Fingerprint) { 
+            $KnownHostsPath = Join-Path $SshPath "known_hosts"
+            $DataToAppend = $Fingerprint + [Environment]::NewLine
+            [System.IO.File]::AppendAllText($KnownHostsPath, $DataToAppend)
+            Harden-SystemSSH
+        }
+    }
+    # User interaction
+    Write-Host "[[SSH]] Public Key for NT AUTHORITY\SYSTEM:"
+    Write-Host $PublicKey -ForegroundColor Green
+    Read-Host "ACTION: Add the key above to the server's authorized_keys, then press ENTER to continue"
+}
+
 # Initialize the restic repository
 Invoke-Expression "$ResticExe --verbose init"
 if($LASTEXITCODE) {
