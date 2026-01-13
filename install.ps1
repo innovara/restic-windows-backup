@@ -4,17 +4,25 @@
 
 # =========== start configuration =========== #
 
-# load restic configuration parmeters (destination, passwords, etc.)
-$SecretsScript = Join-Path $PSScriptRoot "secrets.ps1"
+# load restic environment variables with credentials
+$VaultFile = Join-Path $PSScriptRoot "secrets.vault"  # New
+$SecretsScript = Join-Path $PSScriptRoot "secrets.ps1"  # Legacy
+$VaultManagerPath = Join-Path $PSScriptRoot "VaultManager.ps1"
 
-# load backup configuration variables
+# load configuration variables
 $ConfigScript = Join-Path $PSScriptRoot "config.ps1"
 
-# initialize secrets
-. $SecretsScript
+# initialize secrets if the file exists
+if (Test-Path $SecretsScript) { . $SecretsScript }
 
 # initialize config
-. $ConfigScript
+if (Test-Path $ConfigScript) { 
+    . $ConfigScript 
+}
+else {
+    Write-Error "[[Error]] config.ps1 not found. Please create it from the template before running install."
+    exit 1
+}
 
 # apply global configuration
 $ResticExe = Join-Path $InstallPath $ExeName
@@ -22,6 +30,9 @@ $LogPath = Join-Path $InstallPath "logs"
 
 # make LASTEXITCODE global to enable error checking for Invoke-Expression commands
 $global:LASTEXITCODE=0
+
+# assume the repository is not initialized
+$RepoExists = $false
 
 # =========== end configuration =========== #
 
@@ -72,13 +83,115 @@ if(-not (Test-Path $LocalExcludeFile)) {
     New-Item -Type File -Path $LocalExcludeFile | Out-Null
 }
 
-# Initialize the restic repository
-Invoke-Expression "$ResticExe --verbose init"
-if($LASTEXITCODE) {
-    Write-Warning "[[Init]] Repository initialization failed. Check errors and resolve."
+# Setup secure credentials if they aren't already provided by secrets.ps1
+# Ask the repository question FIRST for everyone to set the $RepoExists state
+$RepoExists = (Read-Host "Is your restic repository already initialized? (Y/n)").ToLower() -ne 'n'
+# Handle the credentials
+if ([String]::IsNullOrEmpty($Env:RESTIC_PASSWORD)) {
+    if (-not (Test-Path $VaultFile)) {
+        if (Test-Path $VaultManagerPath) {
+            if (-not $RepoExists) {
+                Write-Host ("`n" + ("!" * 60)) -ForegroundColor Red 
+                Write-Host "                    IMPORTANT WARNING" -ForegroundColor Red 
+                Write-Host ("!" * 60) -ForegroundColor Red 
+                Write-Host " You are about to choose a password for the new repository." 
+                Write-Host " Remembering your password is important! If you lose it, you" 
+                Write-Host " won't be able to access data stored in the repository." 
+                Write-Host " Choose a STRONG password." 
+                Write-Host ("-" * 60) -ForegroundColor Red 
+            }
+            & {
+                # Create the vault
+                . $VaultManagerPath
+                New-ResticVault -VaultFile $VaultFile
+            }
+        } else {
+            Write-Error "[[Error]] VaultManager.ps1 not found. It is required to create a secure vault."
+            exit 1
+        }
+    } else {
+        # Situation: Vault file exists.
+        Write-Host "[[Vault]] Secure vault found. Using existing credentials."
+    }
+} else {
+    # Legacy path: They already have a password in secrets.ps1, so we just use it.
+    Write-Host "[[Secrets]] Legacy secrets.ps1 found. Using existing credentials."
 }
-else {
-    Write-Output "[[Init]] Repository successfully initialized."
+
+# Initialize the restic repository
+$ResticRepo = $Env:RESTIC_REPOSITORY
+$InitTask = "ResticRepoInit"
+$Timestamp = Get-Date -Format "yyyyMMddTHHmmssffff"
+$InitLog = Join-Path $LogPath "$Timestamp.init.log.txt"
+# Determine how to load secrets for the SYSTEM task
+if ((Test-Path $VaultFile) -and [String]::IsNullOrEmpty($Env:RESTIC_PASSWORD)) {
+    # Path A: use the secure vault
+    $SecretLoader = @"
+        . '$VaultManagerPath'
+        Export-VaultToEnv -VaultFile '$VaultFile'
+"@
+} elseif (-not [String]::IsNullOrEmpty($Env:RESTIC_PASSWORD)) {
+    # Path B: legacy secrets.ps1
+    $SecretLoader = if (Test-Path $SecretsScript) { ". '$SecretsScript'" } else { "" }
+} else {
+    Write-Error "[[Init]] Error: No credentials found. Please provide secrets.ps1 or secrets.vault."
+    exit 1
+}
+# Use the RepoExists flag set prior the vault / secrets logic
+$InitCmd = if ($RepoExists) { @("cat", "config") } else { @("init") }
+$InitScript = Join-Path $PSScriptRoot "init_script.ps1"
+[System.IO.File]::WriteAllText($InitScript, @"
+    try {
+        $SecretLoader
+        
+        `$resticArgs = @(
+            "-o", "sftp.args=-o BatchMode=yes",
+            $( ($InitCmd | ForEach-Object { "'$_'" }) -join ", "),
+            "-r", "$ResticRepo",
+            "--verbose"
+        )
+
+        & '$ResticExe' @resticArgs 2>&1 | Out-File -FilePath '$InitLog' -Encoding utf8
+    } 
+    finally {
+        # Capture the exit code of the last command (restic)
+        `$Code = if (`$null -eq `$LastExitCode) { 1 } else { `$LastExitCode }
+        # Explicitly terminate the session with that code
+        exit `$Code
+    }
+"@)
+if (Get-ScheduledTask -TaskName $InitTask -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $InitTask -Confirm:$false
+}
+$InitArgs = "-ExecutionPolicy Bypass -NonInteractive -NoLogo -NoProfile -File `"$InitScript`""
+$InitAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $InitArgs
+Register-ScheduledTask -TaskName $InitTask -Action $InitAction -User "NT AUTHORITY\SYSTEM" | Out-Null
+try {
+    Start-ScheduledTask -TaskName $InitTask | Out-Null
+    $Timeout = 30; $Elapsed = 0
+    while ((Get-ScheduledTask -TaskName $InitTask).State -eq 'Running' -and $Elapsed++ -lt $Timeout) { Start-Sleep 1 }
+    if (Test-Path $InitLog) {
+        $RawOutput = Get-Content $InitLog -Raw
+        $InitResult = (Get-ScheduledTask -TaskName $InitTask | Get-ScheduledTaskInfo).LastTaskResult
+        # Successful creation (Exit 0)
+        $Success = ($InitResult -eq 0) 
+        # Already exists (Exit 1 + specific error string)
+        $AlreadyExists = ($InitResult -ne 0 -and $RawOutput -match "already exists")
+        # Verified existing (Exit 0 from 'cat config')
+        $Verified = ($InitResult -eq 0 -and $RawOutput -match "chunker_polynomial")
+        if ($Success -or $AlreadyExists -or $Verified) {
+            Write-Host "[[Init]] Success: Repository is ready."
+        } else {
+            Write-Warning "[[Init]] Fatal Error. Restic reported (Exit Code: $InitResult):"
+            Write-Host $RawOutput.Trim() -ForegroundColor Yellow
+            exit 1
+        }
+    }
+}
+finally {
+    Unregister-ScheduledTask -TaskName $InitTask -Confirm:$false -ErrorAction SilentlyContinue
+    if (Test-Path $InitScript) { Remove-Item $InitScript -ErrorAction SilentlyContinue }
+    Write-Host "[[Init]] Notice: Initialization log preserved at $InitLog"
 }
 
 # Scheduled Windows Task Scheduler to run the backup
