@@ -101,14 +101,24 @@ function Invoke-Unlock {
         "[[Unlock]] Warning: unable to list locks." | Tee-Object -Append $ErrorLog
     }
     if($locks.Length -gt 0) {
-        # unlock the repository (assumes this machine is the only one that will ever use it)
-        Invoke-Expression "$Script:ResticExe unlock 3>&1 2>> $ErrorLog | Out-File -Append $SuccessLog"
-        if($LASTEXITCODE) {
-            "[[Unlock]] Error - unable to unlock repository." | Tee-Object -Append $ErrorLog
+        # check if we are allowed to unlock
+        if ($AutoUnlock -ne $false) {
+            # unlock the repository (assumes this machine is the only one that will ever use it)
+            Invoke-Expression "$Script:ResticExe unlock 3>&1 2>> $ErrorLog | Out-File -Append $SuccessLog"
+            if($LASTEXITCODE) {
+                "[[Unlock]] Error - unable to unlock repository." | Tee-Object -Append $ErrorLog
+                return $false
+            }
+            "[[Unlock]] Repository was locked. Unlocking." | Tee-Object -Append $ErrorLog | Out-File -Append $SuccessLog
+            Start-Sleep 120
+            return $true
         }
-        "[[Unlock]] Repository was locked. Unlocking." | Tee-Object -Append $ErrorLog | Out-File -Append $SuccessLog
-        Start-Sleep 120
+        else {
+            "[[Unlock]] Repository is locked and AutoUnlock is false. Skipping attempt." | Tee-Object -Append $ErrorLog | Out-File -Append $SuccessLog
+            return $false
+        }
     }
+    return $true
 }
 
 # test if maintenance on the backup set is needed. Return $true if maintenance is needed
@@ -574,8 +584,17 @@ function Invoke-Main {
 
         $repository_available = Invoke-ConnectivityCheck $success_log $error_log
         if($repository_available -eq $true) {
-            Invoke-Unlock $success_log $error_log
-            $backup_success = Invoke-Backup $success_log $error_log
+            # check if we can proceed based on lock state
+            $unlocked = Invoke-Unlock $success_log $error_log
+            
+            if ($unlocked) {
+                $backup_success = Invoke-Backup $success_log $error_log
+            }
+            else {
+                # if locked and we can't auto-unlock, treat this attempt as a failure
+                $backup_success = $false
+                "[[Backup]] Aborting attempt: Repository is locked." | Tee-Object -Append $success_log | Out-File -Append $error_log
+            }
 
             # NOTE: a previously locked repository will cause errors in the log; but backup would be 'successful'
             # Removing this overly-aggressive test for backup success and relying upon Invoke-Backup to report on success/failure
@@ -638,7 +657,16 @@ function Invoke-Main {
 
         $repository_available = Invoke-ConnectivityCheck $success_log $error_log
         if($repository_available -eq $true) {
-            $maintenance_success = Invoke-Maintenance $success_log $error_log
+            # check for locks during maintenance as well
+            $unlocked = Invoke-Unlock $success_log $error_log
+            
+            if ($unlocked) {
+                $maintenance_success = Invoke-Maintenance $success_log $error_log
+            }
+            else {
+                $maintenance_success = $false
+                "[[Maintenance]] Aborting attempt: Repository is locked." | Tee-Object -Append $success_log | Out-File -Append $error_log
+            }
 
             # $maintenance_success = ($maintenance_success -eq $true) -and (!(Test-Path $error_log) -or ((Get-Item $error_log).Length -eq 0))
             $total_attempts = $GlobalRetryAttempts - $attempt_count + 1
