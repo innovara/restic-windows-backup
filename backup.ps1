@@ -204,18 +204,6 @@ function Invoke-Maintenance {
         $maintenance_success = $false
     }
 
-    # Invoke restic self-update to check for a newer version
-    # This is enabled by default unless configuration disables self-update
-    if ([String]::IsNullOrEmpty($SelfUpdateEnabled) -or ($SelfUpdateEnabled -eq $true)) {
-        # check for updated restic version
-        "[[Maintenance]] Checking for new version of restic..." | Out-File -Append $SuccessLog
-        Invoke-Expression "$Script:ResticExe self-update 3>&1 2>> $ErrorLog | Out-File -Append $SuccessLog"
-        if($LASTEXITCODE) {
-            "[[Maintenance]] Self-update of restic.exe completed with errors" | Tee-Object -Append $ErrorLog | Out-File -Append $SuccessLog
-            $maintenance_success = $false
-        }
-    }
-
     "[[Maintenance]] End $(Get-Date)" | Tee-Object -Append $SuccessLog | Write-Host
 
     if($maintenance_success -eq $true) {
@@ -535,6 +523,29 @@ function Invoke-HistoryCheck {
     }
 }
 
+# Invoke restic self-update to check for a newer version
+# This is enabled by default unless configuration disables self-update
+function Invoke-ResticUpdate {
+    Param($SuccessLog, $ErrorLog)
+    
+    if ($SelfUpdateEnabled -eq $false) { 
+        return $true 
+    }
+    "[[Update]] Checking for new version of restic..." | Out-File -Append $SuccessLog
+    Invoke-Expression "$Script:ResticExe self-update 3>&1 2>> $ErrorLog | Out-File -Append $SuccessLog"
+    $lastError = $global:LASTEXITCODE
+
+    if ($lastError -eq 0) {
+        # Status 0 = Success (already up to date OR successfully updated)
+        return $true
+    }
+    else {
+        # Status != 0 = Failure (Network, Permissions, etc.)
+        "[[Update]] Error: Restic self-update failed with exit code $lastError" | Tee-Object -Append $ErrorLog | Out-File -Append $SuccessLog
+        return $false
+    }
+}
+
 # main function
 function Invoke-Main {
 
@@ -643,6 +654,20 @@ function Invoke-Main {
             }
             else {
                 "[[Backup]] Retry limit has been reached. No more attempts to backup will be made." | Tee-Object -Append $success_log | Write-Host
+            }
+        }
+
+        if ($backup_success -eq $true -or $attempt_count -eq 0) {
+
+            $update_result = Invoke-ResticUpdate $success_log $error_log
+
+            if ($backup_success -eq $true -and $update_result -eq $false) {
+                 # Backup was successful but updating restic failed
+                "[[Update]] Warning: Backup was successful, but Restic update failed." | Tee-Object -Append $success_log | Write-Host
+            }
+            elseif ($update_result -eq $false) {
+                # Backup already failed, and updating restic failed too
+                $backup_success = $false 
             }
         }
 
