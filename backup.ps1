@@ -533,7 +533,7 @@ function Invoke-ResticUpdate {
     }
     "[[Update]] Checking for new version of restic..." | Out-File -Append $SuccessLog
     Invoke-Expression "$Script:ResticExe self-update 3>&1 2>> $ErrorLog | Out-File -Append $SuccessLog"
-    $lastError = $global:LASTEXITCODE
+    $lastError = $LASTEXITCODE
 
     if ($lastError -eq 0) {
         # Status 0 = Success (already up to date OR successfully updated)
@@ -610,6 +610,14 @@ function Invoke-Main {
         $success_log = Join-Path $Script:LogPath ($timestamp + ".backup.log.txt")
         $error_log = Join-Path $Script:LogPath ($timestamp + ".backup.err.txt")
 
+        if ($attempt_count -eq $GlobalRetryAttempts) {
+            if (-not (Invoke-ResticUpdate $success_log $error_log)) {
+                "[[Update]] Warning: Self-update failed. Proceeding with backup attempt..." | Tee-Object -Append $success_log | Write-Host
+                # Reset global exit code so it doesn't interfere with the connectivity check
+                $global:LASTEXITCODE = 0
+            }
+        }
+
         $repository_available = Invoke-ConnectivityCheck $success_log $error_log
         if($repository_available -eq $true) {
             # check if we can proceed based on lock state
@@ -654,20 +662,6 @@ function Invoke-Main {
             }
             else {
                 "[[Backup]] Retry limit has been reached. No more attempts to backup will be made." | Tee-Object -Append $success_log | Write-Host
-            }
-        }
-
-        if ($backup_success -eq $true -or $attempt_count -eq 0) {
-
-            $update_result = Invoke-ResticUpdate $success_log $error_log
-
-            if ($backup_success -eq $true -and $update_result -eq $false) {
-                 # Backup was successful but updating restic failed
-                "[[Update]] Warning: Backup was successful, but Restic update failed." | Tee-Object -Append $success_log | Write-Host
-            }
-            elseif ($update_result -eq $false) {
-                # Backup already failed, and updating restic failed too
-                $backup_success = $false 
             }
         }
 
